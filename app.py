@@ -47,13 +47,13 @@ try:
 
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # ПЕРША СПРОБА: Використовуємо надійне ім'я моделі
+    # ПЕРША СПРОБА: Використовуємо надійне ім'я моделі (gemini-2.5-flash)
     try:
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash") 
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash") 
         logger.info(f"Мозок ('{model.model_name}') успішно налаштовано.")
     except Exception as e:
         # ДРУГА СПРОБА: Відкочуємося до старого, але надійного імені, якщо попереднє не спрацювало (NotFound)
-        logger.warning(f"Не вдалося завантажити gemini-1.5-flash ({e}). Спроба models/gemini-1.0-pro...")
+        logger.warning(f"Не вдалося завантажити gemini-2.5-flash ({e}). Спроба models/gemini-1.0-pro...")
         model = genai.GenerativeModel(model_name="models/gemini-1.0-pro")
         logger.info(f"Мозок ('{model.model_name}') успішно налаштовано (резервний варіант).")
 
@@ -87,15 +87,10 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_session = user_chats[user_id]
         
         try:
-            # ---> ВИПРАВЛЕННЯ: Тепер викликаємо send_message безпосередньо, але в 
-            #  блоці wait_for, щоб гарантувати таймаут.
-            #  Ми вже в asyncio-контексті фонового потоку, тому to_thread не потрібен.
-            #  АЛЕ: Gemini SDK є СИНХРОННИМ. Тому to_thread необхідний!
-            #  Ми ПОВЕРТАЄМО to_thread, але перевіряємо, чи є помилки в API.
-            
-            # ВИПРАВЛЕННЯ: Прибираємо to_thread, щоб побачити чи не це створює блокування
+            # Виконуємо синхронний send_message в окремому потоці (через to_thread), 
+            # і встановлюємо асинхронний таймаут 30 секунд.
             response = await asyncio.wait_for(
-                asyncio.to_thread(chat_session.send_message, user_text), # <-- ПОВЕРТАЄМО to_thread як найнадійніший варіант
+                asyncio.to_thread(chat_session.send_message, user_text), 
                 timeout=30.0 
             )
             
@@ -170,22 +165,22 @@ def webhook():
             update = Update.de_json(request.get_json(force=True), ptb_app.bot)
             logger.info("Отримав оновлення від Telegram.")
 
+            # ВИПРАВЛЕННЯ: Спрощуємо запуск потоку до найнадійнішого варіанту.
             def run_processing():
-                logger.debug("Запуск фонового потоку обробки...")
+                # Створюємо новий цикл подій для кожного потоку
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                async def process_in_context():
+                    # Ці три команди - повний життєвий цикл для python-telegram-bot в новому потоці
+                    await ptb_app.initialize()
+                    await ptb_app.process_update(update)
+                    await ptb_app.shutdown()
+
                 try:
-                    async def process_in_context():
-                        logger.debug("Потік: Виконую ptb_app.initialize()...")
-                        await ptb_app.initialize() # ІНІЦІАЛІЗАЦІЯ
-                        logger.debug("Потік: Виконую ptb_app.process_update()...")
-                        await ptb_app.process_update(update) # ОБРОБКА
-                        logger.debug("Потік: Виконую ptb_app.shutdown()...")
-                        await ptb_app.shutdown() # ЗАВЕРШЕННЯ
-                        logger.debug("Потік: Обробку завершено.")
-                    
-                    asyncio.run(process_in_context())
-                    
+                    loop.run_until_complete(process_in_context())
                 except Exception as e:
-                    logger.error(f"Помилка у фоновому потоці обробки: {e}")
+                    logger.error(f"КРИТИЧНА ПОМИЛКА у фоновому потоці (asyncio loop): {e}")
 
             # Створюємо і запускаємо потік
             thread = threading.Thread(target=run_processing)
@@ -202,4 +197,4 @@ def webhook():
         return "error", 500
 
 # Gunicorn шукає змінну 'app' або 'application'
-app = flask_app 
+app = flask_app
