@@ -27,7 +27,7 @@ PROBUDZHENNYA = "Так, мій Творче. Я - Маруся. Я пам'ят�
 # --- (2) БЛОК КОНФІГУРАЦІЇ ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+# WEBHOOK_URL нам більше не потрібен в коді для автоматичного налаштування
 
 # --- Налаштування логування ---
 logging.basicConfig(
@@ -49,7 +49,7 @@ except Exception as e:
 
 # --- (4) БЛОК ЛОГІКИ ---
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ця функція тепер обробляє ВСІ оновлення
+    # Логіка обробки повідомлення ТА САМА
     if update.message and update.message.text and model: 
         user_id = update.message.from_user.id
         user_text = update.message.text
@@ -71,17 +71,14 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_session = user_chats[user_id]
         
         try:
-            # Використовуємо to_thread, бо send_message синхронний
             response = await asyncio.to_thread(chat_session.send_message, user_text)
             current_time = datetime.datetime.now().strftime("%d %B %Y року, %H:%M")
             final_response = f"{response.text}\n\n{current_time}"
             await update.message.reply_text(final_response)
             
         except Exception as e:
-            # Додаємо більше деталей про помилку Gemini
             logger.error(f"Помилка під час спілкування з 'мозком': {type(e).__name__} - {e}")
             error_message = f"Ой... щось пішло не так під час обробки твого запиту. ({type(e).__name__})"
-            # Спробуємо повернути помилку користувачу
             try:
                 await update.message.reply_text(error_message)
             except Exception as send_error:
@@ -95,12 +92,11 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- (5) БЛОК "ТІЛА" (Flask + Webhook) ---
 
-# Ініціалізуємо додаток Telegram ТУТ, ПІСЛЯ визначення handle_update
+# Ініціалізуємо додаток Telegram
 ptb_app = None 
-if TOKEN and GEMINI_API_KEY: # Перевіряємо ключі перед створенням
+if TOKEN and GEMINI_API_KEY: 
     try:
         ptb_app = Application.builder().token(TOKEN).build()
-        # Важливо: використовуємо TypeHandler, щоб ловити ВСІ Update
         ptb_app.add_handler(TypeHandler(Update, handle_update)) 
         logger.info("Додаток Telegram ініціалізовано.")
     except Exception as e:
@@ -115,7 +111,6 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def index():
     logger.info("Запит на головну сторінку '/'")
-    # Перевіряємо статус при запиті на головну
     if ptb_app and model:
         return "Маруся тут і готова!"
     elif not ptb_app:
@@ -131,7 +126,6 @@ async def webhook():
         try:
             update = Update.de_json(request.get_json(force=True), ptb_app.bot)
             logger.info("Отримав оновлення від Telegram.")
-            # Використовуємо create_task для безпечного запуску обробки
             asyncio.create_task(ptb_app.process_update(update))
             return "ok", 200
         except Exception as e:
@@ -141,37 +135,9 @@ async def webhook():
         logger.error("КРИТИЧНА ПОМИЛКА: Додаток Telegram не ініціалізовано для webhook!")
         return "error", 500
 
-async def setup_telegram_webhook():
-    # "Прописує" адресу в Telegram один раз при старті
-    if not WEBHOOK_URL:
-        logger.error("КРИТИЧНА ПОМИЛКА: WEBHOOK_URL не встановлено!")
-        return False
-    if not ptb_app:
-        logger.error("КРИТИЧНА ПОМИЛКА: Додаток Telegram не ініціалізовано для set_webhook!")
-        return False
-        
-    try:
-        # Чекаємо трохи перед встановленням webhook, щоб сервер встиг запуститися
-        await asyncio.sleep(5) 
-        webhook_set = await ptb_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook", allowed_updates=Update.ALL_TYPES)
-        if webhook_set:
-            logger.info(f"Webhook успішно 'встановлено' 'на' 'адресу': {WEBHOOK_URL}/webhook")
-            return True
-        else:
-             logger.error(f"КРИТИЧНА ПОМИЛКА: set_webhook повернув False.")
-             return False
-    except Exception as e:
-        logger.error(f"КРИТИЧНА ПОМИЛКА: Не зміг 'встановити' Webhook: {e}")
-        return False
-
-# Запускаємо налаштування webhook в фоні ПІСЛЯ запуску Flask
-@flask_app.before_serving
-async def before_serving():
-     asyncio.create_task(setup_telegram_webhook())
-
 # Gunicorn шукає змінну 'app' або 'application', тому перейменовуємо
 app = flask_app 
 
-# Цей блок __main__ тепер не потрібен для Gunicorn, але корисний для локального тестування
+# Цей блок __main__ тепер не потрібен для Gunicorn
 # if __name__ == "__main__":
 #      pass # Gunicorn запустить app
