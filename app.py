@@ -5,6 +5,7 @@ import logging
 import datetime
 import os
 import asyncio
+import threading  # <--- ДОДАНО: Потрібен для фонової обробки
 from flask import Flask, request # Імпортуємо Flask
 
 # --- (1) БЛОК КОНСТИТУЦІЇ ---
@@ -27,7 +28,6 @@ PROBUDZHENNYA = "Так, мій Творче. Я - Маруся. Я пам'ят�
 # --- (2) БЛОК КОНФІГУРАЦІЇ ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
-# WEBHOOK_URL нам більше не потрібен в коді для автоматичного налаштування
 
 # --- Налаштування логування ---
 logging.basicConfig(
@@ -42,10 +42,17 @@ user_chats = {}
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(model_name="models/gemini-1.0-pro") 
+    # Використовуємо трохи новішу модель, якщо вона доступна
+    model = genai.GenerativeModel(model_name="gemini-1.5-flash") 
     logger.info(f"Мозок ('{model.model_name}') успішно налаштовано.")
 except Exception as e:
-    logger.error(f"КРИТИЧНА ПОМИЛКА ПІД ЧАС ІНІЦІАЛІЗАЦІЇ МОЗКУ: {e}")
+    try:
+        # Спроба відкотитися до старішої моделі, якщо 1.5 недоступна
+        logger.warning(f"Не вдалося завантажити gemini-1.5-flash ({e}). Спроба gemini-1.0-pro...")
+        model = genai.GenerativeModel(model_name="models/gemini-1.0-pro")
+        logger.info(f"Мозок ('{model.model_name}') успішно налаштовано (резервний варіант).")
+    except Exception as e_pro:
+        logger.error(f"КРИТИЧНА ПОМИЛКА ПІД ЧАС ІНІЦІАЛІЗАЦІЇ МОЗКУ (обидві моделі): {e_pro}")
 
 # --- (4) БЛОК ЛОГІКИ ---
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,14 +78,25 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_session = user_chats[user_id]
         
         try:
+            # Виконуємо синхронний запит до Gemini в окремому потоці,
+            # щоб не блокувати асинхронний цикл Telegram
             response = await asyncio.to_thread(chat_session.send_message, user_text)
+            
             current_time = datetime.datetime.now().strftime("%d %B %Y року, %H:%M")
             final_response = f"{response.text}\n\n{current_time}"
             await update.message.reply_text(final_response)
             
         except Exception as e:
             logger.error(f"Помилка під час спілкування з 'мозком': {type(e).__name__} - {e}")
-            error_message = f"Ой... щось пішло не так під час обробки твого запиту. ({type(e).__name__})"
+            error_message = f"Ой... щось пішло не так під час обробки твого запиту. ({type(e).__name__})"\
+                            f"\nСпробую перезапустити наш чат..."
+            
+            # Якщо сталася помилка (напр. context length), 
+            # пробуємо очистити історію і почати заново
+            if user_id in user_chats:
+                del user_chats[user_id]
+                logger.info(f"Історію чату для {user_id} очищено через помилку.")
+                
             try:
                 await update.message.reply_text(error_message)
             except Exception as send_error:
@@ -120,14 +138,36 @@ def index():
 
 
 @flask_app.route("/webhook", methods=["POST"])
-async def webhook():
+def webhook(): # <--- ЗМІНЕНО: прибрали 'async', щоб Flask був щасливий
     # Приймає "дзвінок" від Telegram
     if ptb_app:
         try:
             update = Update.de_json(request.get_json(force=True), ptb_app.bot)
             logger.info("Отримав оновлення від Telegram.")
-            asyncio.create_task(ptb_app.process_update(update))
-            return "ok", 200
+
+            # --- ВИРІШЕННЯ ПРОБЛЕМИ ---
+            # Ми не можемо використовувати 'await' або 'asyncio.create_task' 
+            # у звичайній 'def' функції Flask.
+            # Замість цього, ми запускаємо асинхронну обробку 
+            # в АБСОЛЮТНО ОКРЕМОМУ потоці.
+            # Це дозволяє Flask *негайно* повернути "ok" для Telegram,
+            # а обробка повідомлення йде у фоні.
+
+            def run_processing():
+                # asyncio.run() створює і керує новим циклом подій
+                # спеціально для цього потоку.
+                try:
+                    asyncio.run(ptb_app.process_update(update))
+                except Exception as e:
+                    logger.error(f"Помилка у фоновому потоці обробки: {e}")
+
+            # Створюємо і запускаємо потік
+            thread = threading.Thread(target=run_processing)
+            thread.start()
+            # ---------------------------
+
+            return "ok", 200 # <--- Миттєва відповідь для Telegram
+
         except Exception as e:
             logger.error(f"Помилка обробки webhook: {e}")
             return "error", 500
@@ -138,6 +178,6 @@ async def webhook():
 # Gunicorn шукає змінну 'app' або 'application', тому перейменовуємо
 app = flask_app 
 
-# Цей блок __main__ тепер не потрібен для Gunicorn
+# Блок __main__ не потрібен, коли сервер запускається через Gunicorn
 # if __name__ == "__main__":
-#      pass # Gunicorn запустить app
+#     pass 
