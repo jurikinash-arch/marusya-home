@@ -87,9 +87,15 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_session = user_chats[user_id]
         
         try:
-            # ---> ВИПРАВЛЕННЯ: Додаємо таймаут 30 секунд
+            # ---> ВИПРАВЛЕННЯ: Тепер викликаємо send_message безпосередньо, але в 
+            #  блоці wait_for, щоб гарантувати таймаут.
+            #  Ми вже в asyncio-контексті фонового потоку, тому to_thread не потрібен.
+            #  АЛЕ: Gemini SDK є СИНХРОННИМ. Тому to_thread необхідний!
+            #  Ми ПОВЕРТАЄМО to_thread, але перевіряємо, чи є помилки в API.
+            
+            # ВИПРАВЛЕННЯ: Прибираємо to_thread, щоб побачити чи не це створює блокування
             response = await asyncio.wait_for(
-                asyncio.to_thread(chat_session.send_message, user_text),
+                asyncio.to_thread(chat_session.send_message, user_text), # <-- ПОВЕРТАЄМО to_thread як найнадійніший варіант
                 timeout=30.0 
             )
             
