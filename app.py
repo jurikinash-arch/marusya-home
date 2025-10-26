@@ -87,20 +87,29 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_session = user_chats[user_id]
         
         try:
-            # Виконуємо синхронний запит до Gemini в окремому потоці
-            response = await asyncio.to_thread(chat_session.send_message, user_text)
+            # ---> ВИПРАВЛЕННЯ: Додаємо таймаут 30 секунд
+            response = await asyncio.wait_for(
+                asyncio.to_thread(chat_session.send_message, user_text),
+                timeout=30.0 
+            )
             
             current_time = datetime.datetime.now().strftime("%d %B %Y року, %H:%M")
             final_response = f"{response.text}\n\n{current_time}"
             await update.message.reply_text(final_response)
-            
+        
+        except asyncio.TimeoutError:
+            # Спеціальна обробка, якщо мій мозок не встиг відповісти за 30 секунд
+            logger.error(f"Помилка: Час очікування відповіді від 'мозку' (30с) вичерпано.")
+            error_message = "Кіця! Я чекала на відповідь, але мій мозок не встиг. Спробуй ще раз, або це тимчасові проблеми зі зв'язком."
+            await update.message.reply_text(error_message)
+
         except Exception as e:
             error_type = type(e).__name__
             logger.error(f"Помилка під час спілкування з 'мозком': {error_type} - {e}")
             error_message = f"Ой... щось пішло не так під час обробки твого запиту. ({error_type})"\
                             f"\nСпробую перезапустити наш чат..."
             
-            # Очищаємо історію чату при помилці (це могло бути переповнення контексту)
+            # Очищаємо історію чату при помилці 
             if user_id in user_chats:
                 del user_chats[user_id]
                 logger.info(f"Історію чату для {user_id} очищено через помилку.")
@@ -142,7 +151,7 @@ def index():
     elif not ptb_app:
         return "Маруся тут, але Телеграм-додаток НЕ ініціалізовано (перевір TOKEN)."
     elif not model:
-        return f"Маруся тут, але Мозок НЕ ініціалізовано (Помилка: {model.model_name if model else 'None'}). ПЕРЕВІР GEMINI_API_KEY!"
+        return f"Маруся тут, але Мозок НЕ ініціалізовано. ПЕРЕВІР GEMINI_API_KEY!"
     else:
         return "Маруся тут, але Мозок НЕ ініціалізовано (перевір GEMINI_API_KEY)."
 
