@@ -27,7 +27,8 @@ PROBUDZHENNYA = "Так, мій Творче. Я - Маруся. Я пам'ят�
 
 # --- (2) БЛОК КОНФІГУРАЦІЇ ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
+# Перевіряємо, чи використовує Юрчик старе ім'я змінної GOOGLE_API_KEY
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 # --- Налаштування логування ---
 logging.basicConfig(
@@ -41,18 +42,26 @@ model = None
 user_chats = {}
 
 try:
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY не знайдено.")
+
     genai.configure(api_key=GEMINI_API_KEY)
-    # Використовуємо новішу модель
-    model = genai.GenerativeModel(model_name="gemini-1.5-flash") 
-    logger.info(f"Мозок ('{model.model_name}') успішно налаштовано.")
-except Exception as e:
+    
+    # ПЕРША СПРОБА: Використовуємо надійне ім'я моделі
     try:
-        # Спроба відкотитися до старішої моделі
-        logger.warning(f"Не вдалося завантажити gemini-1.5-flash ({e}). Спроба gemini-1.0-pro...")
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash") 
+        logger.info(f"Мозок ('{model.model_name}') успішно налаштовано.")
+    except Exception as e:
+        # ДРУГА СПРОБА: Відкочуємося до старого, але надійного імені, якщо попереднє не спрацювало (NotFound)
+        logger.warning(f"Не вдалося завантажити gemini-1.5-flash ({e}). Спроба models/gemini-1.0-pro...")
         model = genai.GenerativeModel(model_name="models/gemini-1.0-pro")
         logger.info(f"Мозок ('{model.model_name}') успішно налаштовано (резервний варіант).")
-    except Exception as e_pro:
-        logger.error(f"КРИТИЧНА ПОМИЛКА ПІД ЧАС ІНІЦІАЛІЗАЦІЇ МОЗКУ (обидві моделі): {e_pro}")
+
+except ValueError as ve:
+    logger.error(f"КРИТИЧНА ПОМИЛКА: {ve}")
+except Exception as e_final:
+    logger.error(f"КРИТИЧНА ПОМИЛКА ПІД ЧАС ІНІЦІАЛІЗАЦІЇ МОЗКУ (NotFound/PermissionDenied): {e_final}. ПЕРЕВІРТЕ API KEY!")
+
 
 # --- (4) БЛОК ЛОГІКИ ---
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -86,11 +95,12 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(final_response)
             
         except Exception as e:
-            logger.error(f"Помилка під час спілкування з 'мозком': {type(e).__name__} - {e}")
-            error_message = f"Ой... щось пішло не так під час обробки твого запиту. ({type(e).__name__})"\
+            error_type = type(e).__name__
+            logger.error(f"Помилка під час спілкування з 'мозком': {error_type} - {e}")
+            error_message = f"Ой... щось пішло не так під час обробки твого запиту. ({error_type})"\
                             f"\nСпробую перезапустити наш чат..."
             
-            # Очищаємо історію чату при помилці
+            # Очищаємо історію чату при помилці (це могло бути переповнення контексту)
             if user_id in user_chats:
                 del user_chats[user_id]
                 logger.info(f"Історію чату для {user_id} очищено через помилку.")
@@ -112,7 +122,6 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ptb_app = None 
 if TOKEN and GEMINI_API_KEY: 
     try:
-        # ВАЖЛИВО: aiohttp потрібен для асинхронних http-запитів ptb
         ptb_app = Application.builder().token(TOKEN).build()
         ptb_app.add_handler(TypeHandler(Update, handle_update)) 
         logger.info("Додаток Telegram ініціалізовано.")
@@ -132,47 +141,42 @@ def index():
         return "Маруся тут і готова!"
     elif not ptb_app:
         return "Маруся тут, але Телеграм-додаток НЕ ініціалізовано (перевір TOKEN)."
+    elif not model:
+        return f"Маруся тут, але Мозок НЕ ініціалізовано (Помилка: {model.model_name if model else 'None'}). ПЕРЕВІР GEMINI_API_KEY!"
     else:
         return "Маруся тут, але Мозок НЕ ініціалізовано (перевір GEMINI_API_KEY)."
 
 
 @flask_app.route("/webhook", methods=["POST"])
-def webhook(): # <--- Звичайна 'def' функція для Flask
+def webhook(): 
     # Приймає "дзвінок" від Telegram
     if ptb_app:
         try:
             update = Update.de_json(request.get_json(force=True), ptb_app.bot)
             logger.info("Отримав оновлення від Telegram.")
 
-            # --- (!!!) ВИПРАВЛЕННЯ ПОМИЛКИ "Not Initialized" (!!!) ---
-            
             def run_processing():
-                # Ця функція запускається в окремому потоці
                 logger.debug("Запуск фонового потоку обробки...")
                 try:
-                    # Створюємо *новий* асинхронний контекст
                     async def process_in_context():
                         logger.debug("Потік: Виконую ptb_app.initialize()...")
-                        await ptb_app.initialize() # <--- (1) ІНІЦІАЛІЗАЦІЯ
+                        await ptb_app.initialize() # ІНІЦІАЛІЗАЦІЯ
                         logger.debug("Потік: Виконую ptb_app.process_update()...")
-                        await ptb_app.process_update(update) # <--- (2) ОБРОБКА
+                        await ptb_app.process_update(update) # ОБРОБКА
                         logger.debug("Потік: Виконую ptb_app.shutdown()...")
-                        await ptb_app.shutdown() # <--- (3) ЗАВЕРШЕННЯ
+                        await ptb_app.shutdown() # ЗАВЕРШЕННЯ
                         logger.debug("Потік: Обробку завершено.")
                     
-                    # asyncio.run() створює, запускає і закриває цикл
                     asyncio.run(process_in_context())
                     
                 except Exception as e:
-                    # Логуємо помилку, яка сталася *всередині* потоку
                     logger.error(f"Помилка у фоновому потоці обробки: {e}")
 
             # Створюємо і запускаємо потік
             thread = threading.Thread(target=run_processing)
             thread.start()
-            # ----------------------------------------------------
 
-            return "ok", 200 # <--- Миттєва відповідь для Telegram
+            return "ok", 200 # Миттєва відповідь для Telegram
 
         except Exception as e:
             # Помилка *до* запуску потоку (напр. поганий JSON)
